@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<services xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://moqui.org/xsd/service-definition-3.xsd">
+
+    <service verb="fetch" noun="NsInventoryAdjustments" type="script" allow-remote="false"
+            location="component://netsuite-darpan/src/main/groovy/netsuite/reconciliation/inventory/fetchNsInventoryAdjustments.groovy">
+        <in-parameters>
+            <parameter name="nsRestletConfigId" required="true"/>
+            <parameter name="itemId" required="true"/>
+            <parameter name="locationId" required="true"/>
+            <parameter name="from" required="true"/>
+            <parameter name="to" required="true"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="statusCode" type="Integer"/>
+            <parameter name="recordCount" type="Integer"/>
+            <parameter name="records"><parameter name="record"/></parameter>
+            <parameter name="responseBody"/>
+            <parameter name="processingWarnings"><parameter name="warningMessage"/></parameter>
+        </out-parameters>
+    </service>
+
+    <service verb="fetch" noun="NsInventoryAdjustmentsBulk" type="script" allow-remote="false"
+            location="component://netsuite-darpan/src/main/groovy/netsuite/reconciliation/inventory/fetchNsInventoryAdjustmentsBulk.groovy">
+        <in-parameters>
+            <parameter name="nsRestletConfigId" required="true"/>
+            <parameter name="itemPairs" required="true" type="List"/>
+            <parameter name="from" required="true"/>
+            <parameter name="to" required="true"/>
+            <parameter name="strictMaxPairs" type="Boolean" default-value="true"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="statusCode" type="Integer"/>
+            <parameter name="totalPairs" type="Integer"/>
+            <parameter name="successPairCount" type="Integer"/>
+            <parameter name="failedPairCount" type="Integer"/>
+            <parameter name="pairResults"><parameter name="pairResult"/></parameter>
+            <parameter name="responseBody"/>
+            <parameter name="processingWarnings"><parameter name="warningMessage"/></parameter>
+        </out-parameters>
+    </service>
+
+    <service verb="retrieve" noun="InventoryAdjustmentsByReference" type="script" allow-remote="false"
+            location="component://netsuite-darpan/src/main/groovy/netsuite/reconciliation/inventory/retrieveInventoryAdjustmentsByReference.groovy"/>
+
+</services>

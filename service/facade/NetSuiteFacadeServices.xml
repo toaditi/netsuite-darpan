@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<services xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:noNamespaceSchemaLocation="http://moqui.org/xsd/service-definition-3.xsd">
+
+    <service verb="list" noun="NsAuthConfigs" type="script" allow-remote="false" authenticate="true"
+            location="component://netsuite-darpan/src/main/groovy/netsuite/facade/settings/listNsAuthConfigs.groovy"/>
+
+    <service verb="save" noun="NsAuthConfig" type="script" allow-remote="false" authenticate="true"
+            location="component://netsuite-darpan/src/main/groovy/netsuite/facade/settings/saveNsAuthConfig.groovy"/>
+
+    <service verb="list" noun="NsRestletConfigs" type="script" allow-remote="false" authenticate="true"
+            location="component://netsuite-darpan/src/main/groovy/netsuite/facade/settings/listNsRestletConfigs.groovy"/>
+
+    <service verb="save" noun="NsRestletConfig" type="script" allow-remote="false" authenticate="true"
+            location="component://netsuite-darpan/src/main/groovy/netsuite/facade/settings/saveNsRestletConfig.groovy"/>
+
+</services>
