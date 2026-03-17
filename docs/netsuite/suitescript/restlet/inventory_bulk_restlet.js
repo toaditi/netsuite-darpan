@@ -1,79 +1,103 @@
 /**
- * NetSuite SuiteScript 2.1 Restlet
- * Bulk inventory adjustment retrieval for up to 100 item/location pairs.
+ * @NApiVersion 2.0
+ * @NScriptType Restlet
+ *
+ * NetSuite Restlet for bulk inventory adjustment retrieval.
+ * Request supports up to 100 item/location pairs per call.
  */
-define(['N/search', 'N/runtime'], (search, runtime) => {
-  const MAX_PAIRS = 100
+define(['N/search', 'N/runtime'], function(search, runtime) {
+  var MAX_PAIRS = 100;
 
-  const toStr = (v) => (v === null || v === undefined ? '' : String(v).trim())
-  const toInt = (v) => {
-    const n = Number(v)
-    return Number.isFinite(n) ? n : null
+  function toStr(value) {
+    return (value === null || value === undefined) ? '' : String(value).trim();
   }
 
-  const buildError = (pair, code, message, retryable = false) => ({
-    pairId: pair.pairId,
-    itemId: pair.itemId,
-    locationId: pair.locationId,
-    status: 'ERROR',
-    errorCode: code,
-    errorMessage: message,
-    retryable,
-    recordCount: 0,
-    records: []
-  })
+  function toInt(value) {
+    var num = Number(value);
+    return isFinite(num) ? num : null;
+  }
 
-  const normalizeRequest = (payload) => {
-    if (!payload || typeof payload !== 'object') {
-      throw new Error('Request payload must be a JSON object')
+  function buildError(pair, code, message, retryable) {
+    return {
+      pairId: pair.pairId,
+      itemId: pair.itemId,
+      locationId: pair.locationId,
+      status: 'ERROR',
+      errorCode: code,
+      errorMessage: message,
+      retryable: !!retryable,
+      recordCount: 0,
+      records: []
+    };
+  }
+
+  function normalizeRequest(payload) {
+    var req = payload || {};
+    if (Object.prototype.toString.call(req) !== '[object Object]') {
+      throw new Error('Request payload must be a JSON object');
     }
 
-    const from = toStr(payload.from)
-    const to = toStr(payload.to)
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(from)) throw new Error('from must be yyyy-MM-dd')
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(to)) throw new Error('to must be yyyy-MM-dd')
+    var fromDate = toStr(req.from);
+    var toDate = toStr(req.to);
 
-    const pairs = Array.isArray(payload.pairs) ? payload.pairs : []
-    if (!pairs.length) throw new Error('pairs is required and must contain at least one row')
-    if (pairs.length > MAX_PAIRS) throw new Error(`pairs cannot exceed ${MAX_PAIRS}`)
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(fromDate)) {
+      throw new Error('from must be yyyy-MM-dd');
+    }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(toDate)) {
+      throw new Error('to must be yyyy-MM-dd');
+    }
 
-    const seen = new Set()
-    const normalized = pairs.map((row, idx) => {
-      const itemId = toStr(row.itemId)
-      const locationId = toStr(row.locationId)
-      if (!itemId) throw new Error(`pairs[${idx}] missing itemId`)
-      if (!locationId) throw new Error(`pairs[${idx}] missing locationId`)
+    var pairs = Array.isArray(req.pairs) ? req.pairs : [];
+    if (!pairs.length) {
+      throw new Error('pairs is required and must contain at least one row');
+    }
+    if (pairs.length > MAX_PAIRS) {
+      throw new Error('pairs cannot exceed ' + MAX_PAIRS);
+    }
 
-      const pairId = toStr(row.pairId) || `${itemId}|${locationId}`
-      if (seen.has(pairId)) throw new Error(`Duplicate pairId: ${pairId}`)
-      seen.add(pairId)
+    var normalized = [];
+    var seen = {};
+    var i;
+    for (i = 0; i < pairs.length; i += 1) {
+      var row = pairs[i] || {};
+      var itemId = toStr(row.itemId);
+      var locationId = toStr(row.locationId);
+      if (!itemId) throw new Error('pairs[' + i + '] missing itemId');
+      if (!locationId) throw new Error('pairs[' + i + '] missing locationId');
 
-      return { pairId, itemId, locationId }
-    })
+      var pairId = toStr(row.pairId) || (itemId + '|' + locationId);
+      if (seen[pairId]) throw new Error('Duplicate pairId: ' + pairId);
+      seen[pairId] = true;
+
+      normalized.push({
+        pairId: pairId,
+        itemId: itemId,
+        locationId: locationId
+      });
+    }
 
     return {
-      requestId: toStr(payload.requestId) || null,
-      from,
-      to,
+      requestId: toStr(req.requestId) || null,
+      from: fromDate,
+      to: toDate,
       pairs: normalized,
-      options: payload.options || {}
-    }
+      options: req.options || {}
+    };
   }
 
-  const fetchTransactions = (pair, from, to) => {
-    // Placeholder query shape. Adjust record type/columns to account-specific model.
-    const itemId = toInt(pair.itemId)
-    const locationId = toInt(pair.locationId)
+  function fetchTransactions(pair, fromDate, toDate) {
+    var itemId = toInt(pair.itemId);
+    var locationId = toInt(pair.locationId);
     if (itemId === null || locationId === null) {
-      return buildError(pair, 'INVALID_KEY', 'itemId and locationId must be numeric', false)
+      return buildError(pair, 'INVALID_KEY', 'itemId and locationId must be numeric', false);
     }
 
-    const txnSearch = search.create({
+    var txnSearch = search.create({
       type: search.Type.TRANSACTION,
       filters: [
         ['item.internalid', 'anyof', itemId], 'AND',
         ['inventorylocation.internalid', 'anyof', locationId], 'AND',
-        ['trandate', 'within', from, to]
+        ['trandate', 'within', fromDate, toDate]
       ],
       columns: [
         search.createColumn({ name: 'internalid' }),
@@ -81,10 +105,10 @@ define(['N/search', 'N/runtime'], (search, runtime) => {
         search.createColumn({ name: 'type' }),
         search.createColumn({ name: 'quantity' })
       ]
-    })
+    });
 
-    const records = []
-    txnSearch.run().each((row) => {
+    var records = [];
+    txnSearch.run().each(function(row) {
       records.push({
         transaction: {
           id: row.getValue({ name: 'internalid' }),
@@ -92,9 +116,9 @@ define(['N/search', 'N/runtime'], (search, runtime) => {
           type: row.getText({ name: 'type' }) || row.getValue({ name: 'type' }),
           qty: row.getValue({ name: 'quantity' })
         }
-      })
-      return true
-    })
+      });
+      return true;
+    });
 
     return {
       pairId: pair.pairId,
@@ -105,23 +129,28 @@ define(['N/search', 'N/runtime'], (search, runtime) => {
       errorMessage: null,
       retryable: false,
       recordCount: records.length,
-      records
-    }
+      records: records
+    };
   }
 
-  const post = (payload) => {
-    const req = normalizeRequest(payload)
+  function post(payload) {
+    var req = normalizeRequest(payload);
+    var results = [];
+    var i;
 
-    const results = req.pairs.map((pair) => {
+    for (i = 0; i < req.pairs.length; i += 1) {
+      var pair = req.pairs[i];
       try {
-        return fetchTransactions(pair, req.from, req.to)
+        results.push(fetchTransactions(pair, req.from, req.to));
       } catch (e) {
-        return buildError(pair, 'PAIR_PROCESSING_FAILED', e.message || 'Unexpected pair failure', false)
+        results.push(buildError(pair, 'PAIR_PROCESSING_FAILED', (e && e.message) || 'Unexpected pair failure', false));
       }
-    })
+    }
 
-    const successPairs = results.filter((r) => r.status !== 'ERROR').length
-    const errorPairs = results.length - successPairs
+    var successPairs = 0;
+    for (i = 0; i < results.length; i += 1) {
+      if (results[i].status !== 'ERROR') successPairs += 1;
+    }
 
     return {
       ok: true,
@@ -130,13 +159,13 @@ define(['N/search', 'N/runtime'], (search, runtime) => {
       summary: {
         requestedPairs: req.pairs.length,
         processedPairs: results.length,
-        successPairs,
-        errorPairs
+        successPairs: successPairs,
+        errorPairs: results.length - successPairs
       },
-      results,
+      results: results,
       errors: []
-    }
+    };
   }
 
-  return { post }
-})
+  return { post: post };
+});
