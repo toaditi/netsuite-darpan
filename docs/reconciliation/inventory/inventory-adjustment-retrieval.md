@@ -55,6 +55,9 @@ Secrets (`password`, `apiToken`) are encrypted fields in entities.
 - `reconciliation.ReconciliationInventoryServices.retrieve#InventoryAdjustmentsByReference`
   - Reads staged reference file (CSV/JSON), extracts item/location pairs, then calls both services per pair.
   - Production inputs must be provided explicitly (`referenceFileLocation`, `from`, `to`, `nsRestletConfigId`, `comparisonRuleSetId`, and one of `sqlRuleSetId` or `sqlStatementTemplate`); `readDbConfigId` defaults to `darpan-test-seed`.
+  - Persisted NS reuse options:
+    - `persistedNsOutputLocation`: optional NS output JSON from a prior run; when set, NS data is reused and NetSuite calls are skipped.
+    - `fetchMissingNsPairs` (default `false`): if persisted NS file is missing some pairs, fetch only missing pairs from NetSuite when true.
   - Supports separate source-field mapping per system:
     - `nsItemIdField`, `nsLocationIdField`
     - `readDbItemIdField`, `readDbLocationIdField`
@@ -113,6 +116,32 @@ Use this mapping when the CSV has NS and OMS item IDs in different columns (for 
     <parameter name="matchedStatus" value="MATCHED_COUNT"/>
     <parameter name="noRecordStatus" value="NO_RECORDS"/>
     <parameter name="errorStatus" value="ERROR"/>
+</service-call>
+```
+
+## Example Persisted Re-Run (Skip Restlet Calls)
+
+After first run, reuse the returned `nsOutputLocation` in later verification runs:
+
+```xml
+<service-call name="reconciliation.ReconciliationInventoryServices.retrieve#InventoryAdjustmentsByReference">
+    <parameter name="referenceFileLocation" value="runtime://tmp/reconciliation/inventory/input/discrepancy-superset-clean.json"/>
+    <parameter name="referenceFileType" value="JSON"/>
+    <parameter name="omsDetailFileLocation" value="runtime://tmp/reconciliation/inventory/input/oms-iid-merged-dedup.csv"/>
+    <parameter name="omsDetailFileType" value="CSV"/>
+    <parameter name="omsDetailHasHeader" value="true"/>
+    <parameter name="discrepancyNsItemIdField" value="netsuite_product_id"/>
+    <parameter name="discrepancyLocationIdField" value="facility_id"/>
+    <parameter name="omsItemIdField" value="netsuite_product_id"/>
+    <parameter name="omsLocationIdField" value="facility_id"/>
+    <parameter name="omsTxnDateField" value="EFFECTIVE_DATE"/>
+    <parameter name="omsQuantityField" value="QUANTITY_ON_HAND_DIFF"/>
+    <parameter name="from" value="2026-02-22"/>
+    <parameter name="to" value="2026-03-17"/>
+    <parameter name="nsRestletConfigId" value="Gorjana_Prod_IID"/>
+    <parameter name="persistedNsOutputLocation" value="runtime://tmp/reconciliation/inventory/retrieval/ns-inventory-adjustments-20260317-123000.json"/>
+    <parameter name="fetchMissingNsPairs" value="false"/>
+    <parameter name="comparisonRuleSetId" value="DARPAN_TEST_COMPARE_RS"/>
 </service-call>
 ```
 

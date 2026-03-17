@@ -152,6 +152,8 @@ boolean omsHasHeader = (omsDetailHasHeader != null) ? (omsDetailHasHeader as Boo
 String fromDateStr = normalize(from)
 String toDateStr = normalize(to)
 String nsConfigId = normalize(nsRestletConfigId)
+String persistedNsOutputLocationValue = normalize(persistedNsOutputLocation)
+boolean fetchMissingNsPairsEnabled = normalizeBool(fetchMissingNsPairs, false)
 String comparisonRuleSetIdToUse = normalize(comparisonRuleSetId)
 String compareStatusFieldName = normalize(compareStatusField) ?: "compareStatus"
 String reasonCodeFieldName = normalize(reasonCodeField) ?: "reasonCode"
@@ -309,85 +311,201 @@ try {
     Map<String, Map> nsResultByPair = [:]
     List<Map> nsChunkResultsList = []
     int totalRetries = 0
+    String nsDataSourceValue = "FETCHED"
 
-    List<List<Map>> chunks = itemPairs.collate(chunkSize)
-    chunks.eachWithIndex { List<Map> chunk, int chunkIdx ->
-        int attempt = 0
-        boolean done = false
-        Map chunkResult = null
-        Exception lastFailure = null
-
-        while (!done) {
-            attempt++
-            try {
-                Map bulkOut = ec.service.sync()
-                        .name("reconciliation.NetSuiteInventoryServices.fetch#NsInventoryAdjustmentsBulk")
-                        .parameters([
-                                nsRestletConfigId: nsConfigId,
-                                itemPairs        : chunk,
-                                from             : fromDateStr,
-                                to               : toDateStr,
-                                strictMaxPairs   : true
-                        ])
-                        .call()
-
-                List pairResults = (bulkOut.pairResults ?: []) as List
-                pairResults.each { Object rowObj ->
-                    Map row = (rowObj instanceof Map) ? ((Map) rowObj) : [:]
-                    String rowPairId = normalize(row.pairId) ?: "${normalize(row.itemId)}|${normalize(row.locationId)}"
-                    if (rowPairId) nsResultByPair[rowPairId] = row
+    if (persistedNsOutputLocationValue) {
+        String persistedPath = resolvePath(persistedNsOutputLocationValue)
+        Object persistedPayload = null
+        try {
+            def persistedRef = ec.resource.getLocationReference(persistedNsOutputLocationValue)
+            if (persistedRef != null && persistedRef.getExists()) {
+                persistedPayload = new JsonSlurper().parseText(persistedRef.getText())
+            } else {
+                File persistedFile = new File(persistedPath)
+                if (!persistedFile.exists()) {
+                    throw new IllegalArgumentException("Persisted NS output file not found at ${persistedPath}")
                 }
-
-                chunkResult = [
-                        chunkIndex: chunkIdx,
-                        pairCount : chunk.size(),
-                        attempts  : attempt,
-                        status    : "SUCCESS",
-                        error     : null,
-                        pairIds   : chunk.collect { it.pairId }
-                ]
-                done = true
-            } catch (Exception e) {
-                lastFailure = e
-                boolean retryable = isRetryableFailure(e.message)
-                if (retryable && attempt <= maxRetries) {
-                    totalRetries++
-                    long sleepMs = (retryBackoffMs * backoffMultiplier.pow(attempt - 1)).longValue()
-                    if (sleepMs > 0L) Thread.sleep(sleepMs)
-                    continue
-                }
-
-                chunkResult = [
-                        chunkIndex: chunkIdx,
-                        pairCount : chunk.size(),
-                        attempts  : attempt,
-                        status    : "FAILED",
-                        error     : normalize(e.message) ?: "Chunk failed",
-                        pairIds   : chunk.collect { it.pairId }
-                ]
-
-                if (continueOnChunkFailure) {
-                    chunk.each { Map pair ->
-                        nsResultByPair[pair.pairId] = [
-                                pairId      : pair.pairId,
-                                itemId      : pair.itemId,
-                                locationId  : pair.locationId,
-                                status      : "ERROR",
-                                errorMessage: chunkResult.error,
-                                recordCount : 0,
-                                records     : []
-                        ]
-                    }
-                    warningList.add("NS chunk ${chunkIdx} failed after ${attempt} attempt(s): ${chunkResult.error}")
-                    done = true
-                } else {
-                    throw lastFailure
-                }
+                persistedPayload = new JsonSlurper().parse(persistedFile)
             }
+        } catch (Exception e) {
+            throw new IllegalArgumentException("Unable to parse persistedNsOutputLocation ${persistedNsOutputLocationValue}: ${normalize(e.message) ?: e.class.simpleName}")
         }
 
-        nsChunkResultsList << chunkResult
-        if (nsDelayMsToUse > 0 && chunkIdx < chunks.size() - 1) Thread.sleep(nsDelayMsToUse as long)
+        List persistedRows = []
+        if (persistedPayload instanceof Map) {
+            Map payloadMap = (Map) persistedPayload
+            if (payloadMap.rows instanceof List) persistedRows = (List) payloadMap.rows
+            else if (payloadMap.itemResults instanceof List) persistedRows = (List) payloadMap.itemResults
+            else throw new IllegalArgumentException("Persisted NS payload must include rows[] (NS output) or itemResults[] (summary)")
+        } else if (persistedPayload instanceof List) {
+            persistedRows = (List) persistedPayload
+        } else {
+            throw new IllegalArgumentException("Persisted NS payload must be a JSON object or list")
+        }
+
+        persistedRows.each { Object rowObj ->
+            if (!(rowObj instanceof Map)) return
+            Map row = (Map) rowObj
+            String rowPairId = normalize(row.pairId)
+            String rowItemId = normalize(row.itemId ?: row.nsItemId)
+            String rowLocationId = normalize(row.locationId ?: row.nsLocationId)
+            String pairKey = rowPairId ?: ((rowItemId && rowLocationId) ? "${rowItemId}|${rowLocationId}" : null)
+            if (!pairKey) return
+
+            String fallbackItemId = rowItemId
+            String fallbackLocationId = rowLocationId
+            if ((!fallbackItemId || !fallbackLocationId) && pairKey.contains("|")) {
+                int pipeIdx = pairKey.indexOf("|")
+                if (!fallbackItemId) fallbackItemId = pairKey.substring(0, pipeIdx)
+                if (!fallbackLocationId) fallbackLocationId = pairKey.substring(pipeIdx + 1)
+            }
+
+            List rowRecords = []
+            if (row.records instanceof List) rowRecords = (List) row.records
+            else if (row.nsRecords instanceof List) rowRecords = (List) row.nsRecords
+            int rowCount = row.recordCount != null
+                    ? toInt(row.recordCount)
+                    : (row.nsRecordCount != null ? toInt(row.nsRecordCount) : rowRecords.size())
+
+            nsResultByPair[pairKey] = [
+                    pairId      : pairKey,
+                    itemId      : fallbackItemId,
+                    locationId  : fallbackLocationId,
+                    status      : normalize(row.status ?: row.nsStatus) ?: "OK",
+                    errorMessage: normalize(row.errorMessage ?: row.error ?: row.nsError),
+                    recordCount : rowCount,
+                    records     : rowRecords
+            ]
+        }
+
+        warningList.add("Reusing persisted NS data from ${persistedNsOutputLocationValue}; loaded ${nsResultByPair.size()} pair results.")
+        nsDataSourceValue = "REUSED_PERSISTED"
+    }
+
+    List<Map> pairsToFetch = itemPairs.findAll { Map pair -> !nsResultByPair.containsKey(pair.pairId) }
+    if (pairsToFetch && persistedNsOutputLocationValue && !fetchMissingNsPairsEnabled) {
+        warningList.add("Persisted NS data missing ${pairsToFetch.size()} pair(s); fetchMissingNsPairs=false so missing pairs were marked as ERROR.")
+        pairsToFetch.each { Map pair ->
+            nsResultByPair[pair.pairId] = [
+                    pairId      : pair.pairId,
+                    itemId      : pair.itemId,
+                    locationId  : pair.locationId,
+                    status      : "ERROR",
+                    errorMessage: "Missing from persisted NS data and fetchMissingNsPairs is false",
+                    recordCount : 0,
+                    records     : []
+            ]
+        }
+        nsChunkResultsList << [
+                chunkIndex: 0,
+                pairCount : itemPairs.size(),
+                attempts  : 0,
+                status    : "REUSED_WITH_GAPS",
+                error     : "Missing persisted pairs were not fetched",
+                pairIds   : itemPairs.collect { it.pairId }
+        ]
+    } else {
+        if (persistedNsOutputLocationValue && !pairsToFetch) {
+            nsChunkResultsList << [
+                    chunkIndex: 0,
+                    pairCount : itemPairs.size(),
+                    attempts  : 0,
+                    status    : "REUSED",
+                    error     : null,
+                    pairIds   : itemPairs.collect { it.pairId }
+            ]
+        }
+
+        if (pairsToFetch) {
+            if (persistedNsOutputLocationValue && fetchMissingNsPairsEnabled) {
+                warningList.add("Persisted NS data missing ${pairsToFetch.size()} pair(s); fetching only missing pairs from NetSuite.")
+                nsDataSourceValue = "MIXED_REUSED_AND_FETCHED"
+            } else {
+                nsDataSourceValue = "FETCHED"
+            }
+
+            int chunkIndexBase = nsChunkResultsList.size()
+            List<List<Map>> chunks = pairsToFetch.collate(chunkSize)
+            chunks.eachWithIndex { List<Map> chunk, int chunkIdx ->
+                int effectiveChunkIndex = chunkIndexBase + chunkIdx
+                int attempt = 0
+                boolean done = false
+                Map chunkResult = null
+                Exception lastFailure = null
+
+                while (!done) {
+                    attempt++
+                    try {
+                        Map bulkOut = ec.service.sync()
+                                .name("reconciliation.NetSuiteInventoryServices.fetch#NsInventoryAdjustmentsBulk")
+                                .parameters([
+                                        nsRestletConfigId: nsConfigId,
+                                        itemPairs        : chunk,
+                                        from             : fromDateStr,
+                                        to               : toDateStr,
+                                        strictMaxPairs   : true
+                                ])
+                                .call()
+
+                        List pairResults = (bulkOut.pairResults ?: []) as List
+                        pairResults.each { Object rowObj ->
+                            Map row = (rowObj instanceof Map) ? ((Map) rowObj) : [:]
+                            String rowPairId = normalize(row.pairId) ?: "${normalize(row.itemId)}|${normalize(row.locationId)}"
+                            if (rowPairId) nsResultByPair[rowPairId] = row
+                        }
+
+                        chunkResult = [
+                                chunkIndex: effectiveChunkIndex,
+                                pairCount : chunk.size(),
+                                attempts  : attempt,
+                                status    : "SUCCESS",
+                                error     : null,
+                                pairIds   : chunk.collect { it.pairId }
+                        ]
+                        done = true
+                    } catch (Exception e) {
+                        lastFailure = e
+                        boolean retryable = isRetryableFailure(e.message)
+                        if (retryable && attempt <= maxRetries) {
+                            totalRetries++
+                            long sleepMs = (retryBackoffMs * backoffMultiplier.pow(attempt - 1)).longValue()
+                            if (sleepMs > 0L) Thread.sleep(sleepMs)
+                            continue
+                        }
+
+                        chunkResult = [
+                                chunkIndex: effectiveChunkIndex,
+                                pairCount : chunk.size(),
+                                attempts  : attempt,
+                                status    : "FAILED",
+                                error     : normalize(e.message) ?: "Chunk failed",
+                                pairIds   : chunk.collect { it.pairId }
+                        ]
+
+                        if (continueOnChunkFailure) {
+                            chunk.each { Map pair ->
+                                nsResultByPair[pair.pairId] = [
+                                        pairId      : pair.pairId,
+                                        itemId      : pair.itemId,
+                                        locationId  : pair.locationId,
+                                        status      : "ERROR",
+                                        errorMessage: chunkResult.error,
+                                        recordCount : 0,
+                                        records     : []
+                                ]
+                            }
+                            warningList.add("NS chunk ${effectiveChunkIndex} failed after ${attempt} attempt(s): ${chunkResult.error}")
+                            done = true
+                        } else {
+                            throw lastFailure
+                        }
+                    }
+                }
+
+                nsChunkResultsList << chunkResult
+                if (nsDelayMsToUse > 0 && chunkIdx < chunks.size() - 1) Thread.sleep(nsDelayMsToUse as long)
+            }
+        }
     }
 
     List<Map> itemResultRows = itemPairs.collect { Map pair ->
@@ -511,6 +629,7 @@ try {
     nsChunkSuccessCount = nsChunkResultsList.count { it.status == "SUCCESS" } as int
     nsChunkFailureCount = nsChunkResultsList.count { it.status == "FAILED" } as int
     nsTotalRetryCount = totalRetries
+    nsDataSource = nsDataSourceValue
     nsChunkResults = nsChunkResultsList
 
     String outputBaseLocation = normalize(outputLocation) ?: "runtime://tmp/reconciliation/inventory/retrieval"
@@ -529,6 +648,8 @@ try {
     Map nsDoc = [
             metadata: [
                     source          : "NS",
+                    nsDataSource    : nsDataSourceValue,
+                    persistedNsOutputLocation: persistedNsOutputLocationValue,
                     runId           : runIdToUse,
                     nsRestletConfigId: nsConfigId,
                     from            : fromDateStr,
@@ -585,6 +706,9 @@ try {
                     omsTxnDateField     : omsTxnDateFieldExpr,
                     omsQuantityField    : omsQuantityFieldExpr,
                     comparisonRuleSetId : comparisonRuleSetIdToUse,
+                    nsDataSource        : nsDataSourceValue,
+                    persistedNsOutputLocation: persistedNsOutputLocationValue,
+                    fetchMissingNsPairs : fetchMissingNsPairsEnabled,
                     compareStatusField  : compareStatusFieldName,
                     reasonCodeField     : reasonCodeFieldName,
                     reasonTextField     : reasonTextFieldName,
